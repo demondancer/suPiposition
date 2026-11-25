@@ -95,6 +95,7 @@ Times are those that each program reports. For suPiposition this is the wall-clo
 
 ### 5.2 Time to Solution
 
+|---|---|
 | Digits | suPiposition | y-cruncher, start to end | Ratio | y-cruncher, computation | Ratio |
 |---:|---:|---:|---:|---:|---:|
 | 10⁸ | 1.155 s | 1.174 s | 1.02 | 1.045 s | 0.90 |
