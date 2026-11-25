@@ -85,6 +85,7 @@ Two tests of gate 1 compare the output with that of y-cruncher itself. They requ
 
 ### 5.1 Experimental Setup
 
+| Component | Specification |
 |---|---|
 | Processor | AMD Ryzen 7 9850X3D: 8 cores, 16 hardware threads, 96 MiB L3 |
 | Memory | 48 GB |
