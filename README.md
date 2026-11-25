@@ -85,6 +85,7 @@ Two tests of gate 1 compare the output with that of y-cruncher itself. They requ
 
 ### 5.1 Experimental Setup
 
+|---|---|
 | Processor | AMD Ryzen 7 9850X3D: 8 cores, 16 hardware threads, 96 MiB L3 |
 | Memory | 48 GB |
 | Operating systems | Windows 11; Fedora Linux 45 under WSL 3.0.5.0 (kernel 6.18) on the same hardware |
@@ -95,7 +96,6 @@ Times are those that each program reports. For suPiposition this is the wall-clo
 
 ### 5.2 Time to Solution
 
-|---|---|
 | Digits | suPiposition | y-cruncher, start to end | Ratio | y-cruncher, computation | Ratio |
 |---:|---:|---:|---:|---:|---:|
 | 10⁸ | 1.155 s | 1.174 s | 1.02 | 1.045 s | 0.90 |
