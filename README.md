@@ -8,7 +8,7 @@ suPiposition computes π with the Chudnovsky series [1], evaluated by binary spl
 
 No block size, crossover point, or thread count is fixed in the source. Every such parameter is derived at startup from the discovered hardware topology (cores, hardware threads, each cache and the threads that share it, NUMA nodes, and available memory) and from a short calibration run, in the tradition of self-adapting numerical software [7, 8]. Every product is verified by a residue checksum, a form of algorithm-based fault tolerance [9].
 
-On the system evaluated in Section 5, suPiposition computes 10⁹ to 5 × 10⁹ digits 1.2 to 1.3 times faster than y-cruncher v0.8.7 [10], and its output agrees with that program's to the last digit.
+On the system evaluated in Section 5, suPiposition computes 10⁹ to 5 × 10⁹ digits 1.22 to 1.33 times faster than y-cruncher v0.8.7 [10] in start-to-end time, and 1.15 to 1.24 times faster against that program's reported computation time. The digits of the two programs are identical.
 
 The design is specified in [DESIGN.md](DESIGN.md).
 
@@ -91,20 +91,41 @@ Two tests of gate 1 compare the output with that of y-cruncher itself. They requ
 | Memory | 48 GB |
 | Operating systems | Windows 11; Fedora Linux 45 under WSL 3.0.5.0 (kernel 6.18) on the same hardware |
 | Compiler | Rust 1.100.0, release profile |
-| Baseline | y-cruncher v0.8.7.9547b on the same system under Windows 11 |
+| Baseline | y-cruncher v0.8.7.9547b (binary `24-ZN5 ~ Komari`, selected by the program) on the same system under Windows 11 |
 
-Times for suPiposition are wall-clock times from process start to exit, including writing the digits to an SSD. Baseline times are the computation times reported by y-cruncher, measured on 2026-11-17; they exclude output, so the comparison is conservative. All suPiposition measurements were taken on 2026-11-25.
+Times are those that each program reports. For suPiposition this is the wall-clock time from startup to completion, which includes calibration, all run-time checks, and writing the digits to an SSD. All measurements were taken on 2026-11-25.
 
 ### 5.2 Time to Solution
 
-| Digits | suPiposition | y-cruncher | Speedup | Digit hash |
-|---:|---:|---:|---:|---|
-| 10⁸ | 1.16 s | | | 199405406068015690 |
-| 10⁹ | 14.0 s | 18.1 s | 1.29 | 807692683230452073 |
-| 2.5 × 10⁹ | 42.1 s | 51.2 s | 1.22 | 1227538786604942620 |
-| 5 × 10⁹ | 93.1 s | 113.1 s | 1.22 | 917012961347625551 |
+suPiposition was run three times at each problem size, with a 20-second pause before every run, and the fastest of the three runs is reported. y-cruncher was then run once at each size (`custom pi -dec:<digits> -hex:0 -od:0`), with the same pause before each run.
 
-The first two rows are medians of three runs; the others are single runs. Run-to-run variation is about 1% and reaches 3% at 5 × 10⁹ digits, where 5 GB of output is written during the run. The digit hashes are identical to those printed by y-cruncher.
+| Digits | suPiposition | y-cruncher, start to end | Ratio | y-cruncher, computation | Ratio |
+|---:|---:|---:|---:|---:|---:|
+| 10⁸ | 1.155 s | 1.174 s | 1.02 | 1.045 s | 0.90 |
+| 10⁹ | 13.808 s | 18.339 s | 1.33 | 17.123 s | 1.24 |
+| 2.5 × 10⁹ | 41.895 s | 51.505 s | 1.23 | 48.312 s | 1.15 |
+| 5 × 10⁹ | 92.415 s | 113.019 s | 1.22 | 106.285 s | 1.15 |
+
+Each ratio is the y-cruncher time divided by the suPiposition time, so a value above 1 favors suPiposition.
+
+- **suPiposition:** the time defined in Section 5.1.
+- **y-cruncher, start to end:** its reported start-to-end wall time, which includes its verification of the base conversion. y-cruncher was run without digit output.
+- **y-cruncher, computation:** its reported total computation time, which excludes that verification and the program's setup. This is the more conservative baseline.
+
+At 10⁹ to 5 × 10⁹ digits, suPiposition is faster by a factor of 1.22 to 1.33 in start-to-end time and of 1.15 to 1.24 against y-cruncher's computation time. At 10⁸ digits the two programs are equal in start-to-end time to within 2%, and y-cruncher's computation time is the shorter by about 10%.
+
+The three suPiposition runs at each size took 1.168, 1.155, and 1.162 s; 14.318, 14.034, and 13.808 s; 43.249, 41.895, and 42.218 s; and 93.882, 94.097, and 92.415 s, a spread of 1 to 4%. The y-cruncher figures are single runs and are subject to similar variation.
+
+Two conditions differed between the programs. y-cruncher ran on locked 2 MiB pages, whereas suPiposition's request for large pages was refused under the same account, and it ran on 4 KiB pages. y-cruncher's working memory was 0.47, 4.71, 11.8, and 22.3 GiB at the four sizes, less than suPiposition requires (Section 5.4).
+
+Both programs produce the same digits. The 64-bit digit hashes printed by both are:
+
+| Digits | Digit hash |
+|---:|---|
+| 10⁸ | 199405406068015690 |
+| 10⁹ | 807692683230452073 |
+| 2.5 × 10⁹ | 1227538786604942620 |
+| 5 × 10⁹ | 917012961347625551 |
 
 Under Linux (WSL 3) on the same hardware, 10⁹ digits take 14.8 to 15.7 s, against 13.9 to 14.9 s under Windows in alternating runs the same day, and 2.5 × 10⁹ digits take 44.6 s. These figures include the overhead of virtualization and should not be taken as representative of Linux on bare metal.
 
