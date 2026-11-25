@@ -97,8 +97,6 @@ Times are those that each program reports. For suPiposition this is the wall-clo
 
 ### 5.2 Time to Solution
 
-suPiposition was run three times at each problem size, with a 20-second pause before every run, and the fastest of the three runs is reported. y-cruncher was then run once at each size (`custom pi -dec:<digits> -hex:0 -od:0`), with the same pause before each run.
-
 | Digits | suPiposition | y-cruncher, start to end | Ratio | y-cruncher, computation | Ratio |
 |---:|---:|---:|---:|---:|---:|
 | 10⁸ | 1.155 s | 1.174 s | 1.02 | 1.045 s | 0.90 |
