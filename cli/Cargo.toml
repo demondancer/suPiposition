@@ -1,0 +1,14 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "suPiposition"
+path = "main.rs"
+
+[dependencies]
+engine = { path = "../engine" }
+kernels = { path = "../kernels" }
+platform = { path = "../platform" }

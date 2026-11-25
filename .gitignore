@@ -1,0 +1,12 @@
+# build output, logs and saved binaries
+/target/
+
+# digits written by runs
+/pi.txt
+*.digits
+
+# third-party programs kept beside the tree for comparison
+/y-cruncher*/
+
+# working notes that describe an earlier state of the code
+/FIRM_NUMBERS.md
