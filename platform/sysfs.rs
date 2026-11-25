@@ -105,6 +105,63 @@ fn cgroup_memory_limit(read: &dyn Fn(&str) -> Option<String>) -> Option<u64> {
     limit
 }
 
+/// The processor time the control group of this process may use, in whole processors (rounded
+/// up), the least set on the group or on any group above it; `None` where no group sets one.
+/// A group's `cpu.max` reads `<quota> <period>` in microseconds, or `max <period>`.
+fn cgroup_cpu_limit(read: &dyn Fn(&str) -> Option<String>) -> Option<u64> {
+    let groups = read("proc/self/cgroup")?;
+    let path = groups.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let mut dir = path.trim().trim_matches('/').to_string();
+    let mut limit: Option<u64> = None;
+    loop {
+        let file = if dir.is_empty() {
+            "sys/fs/cgroup/cpu.max".to_string()
+        } else {
+            format!("sys/fs/cgroup/{dir}/cpu.max")
+        };
+        if let Some(text) = read(&file) {
+            let mut parts = text.split_whitespace();
+            let quota = parts.next().and_then(|t| t.parse::<u64>().ok());
+            let period = parts.next().and_then(|t| t.parse::<u64>().ok());
+            if let (Some(q), Some(per)) = (quota, period)
+                && per > 0
+            {
+                let cpus = q.div_ceil(per).max(1);
+                limit = Some(limit.map_or(cpus, |l| l.min(cpus)));
+            }
+        }
+        if dir.is_empty() {
+            break;
+        }
+        dir = match dir.rfind('/') {
+            Some(i) => dir[..i].to_string(),
+            None => String::new(),
+        };
+    }
+    limit
+}
+
+/// The threads of `usable` by core: the threads that name the same set of siblings.
+fn threads_by_core(
+    usable: &[u64],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> BTreeMap<u64, Vec<u64>> {
+    let mut by_core: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for &c in usable {
+        let dir = format!("sys/devices/system/cpu/cpu{c}/topology/");
+        let siblings = read(&format!("{dir}core_cpus_list"))
+            .or_else(|| read(&format!("{dir}thread_siblings_list")))
+            .map(|t| parse_cpu_list(&t))
+            .unwrap_or_default();
+        let key = siblings.first().copied().unwrap_or(c);
+        by_core.entry(key).or_default().push(c);
+    }
+    for threads in by_core.values_mut() {
+        threads.sort_unstable();
+    }
+    by_core
+}
+
 /// The profile of the system `read` describes, without its extent devices (`vram` and `ssd`
 /// are left empty for the caller to fill).
 pub fn profile_from_reader(read: &dyn Fn(&str) -> Option<String>) -> Option<Profile> {
@@ -132,28 +189,45 @@ pub fn profile_and_nodes_from_reader(
     if usable.is_empty() {
         return None;
     }
+    // A job may also be held to a share of processor time on processors it is not confined to
+    // (`cpu.max`). It is then worth as many workers as that share has whole processors: the
+    // first thread of each core in turn, then second threads. Their placing is left to the
+    // system, which moves them among all the processors the job may use.
+    let mut os_places_threads = false;
+    let usable: Vec<u64> = match cgroup_cpu_limit(read) {
+        Some(cpus) if (cpus as usize) < usable.len() => {
+            let by_core = threads_by_core(&usable, read);
+            let mut picked: Vec<u64> = Vec::with_capacity(cpus as usize);
+            let mut depth = 0usize;
+            while picked.len() < cpus as usize {
+                let before = picked.len();
+                for threads in by_core.values() {
+                    if picked.len() < cpus as usize
+                        && let Some(&t) = threads.get(depth)
+                    {
+                        picked.push(t);
+                    }
+                }
+                if picked.len() == before {
+                    break;
+                }
+                depth += 1;
+            }
+            picked.sort_unstable();
+            os_places_threads = true;
+            picked
+        }
+        _ => usable,
+    };
     let is_usable = |c: &u64| usable.binary_search(c).is_ok();
 
     // Cores: the threads that name the same set of siblings.
-    let mut by_core: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    for &c in &usable {
-        let dir = format!("sys/devices/system/cpu/cpu{c}/topology/");
-        let siblings = read(&format!("{dir}core_cpus_list"))
-            .or_else(|| read(&format!("{dir}thread_siblings_list")))
-            .map(|t| parse_cpu_list(&t))
-            .unwrap_or_default();
-        let key = siblings.first().copied().unwrap_or(c);
-        by_core.entry(key).or_default().push(c);
-    }
-    let core_map: Vec<CoreThreads> = by_core
+    let core_map: Vec<CoreThreads> = threads_by_core(&usable, read)
         .into_values()
         .enumerate()
-        .map(|(i, mut threads)| {
-            threads.sort_unstable();
-            CoreThreads {
-                core_id: i as u64,
-                threads,
-            }
+        .map(|(i, threads)| CoreThreads {
+            core_id: i as u64,
+            threads,
         })
         .collect();
 
@@ -265,7 +339,7 @@ pub fn profile_and_nodes_from_reader(
         ram,
         vram: Vec::new(),
         ssd: Vec::new(),
-        os_places_threads: false,
+        os_places_threads,
     };
     Some((profile, ram_node_ids))
 }
@@ -443,6 +517,45 @@ mod tests {
         let one = files_of(include_str!("testdata/sysfs_wsl2_zen5_8c16t.txt"));
         assert_eq!(profile_of(&one).expect("profile").ram.len(), 1);
         assert!(nodes_of(&one).len() <= 1);
+    }
+
+    /// A job held to a share of processor time, as a container is: on a machine of 384 threads
+    /// it runs as many workers as its share has whole processors, on a core each, and leaves
+    /// their placing to the system.
+    #[test]
+    fn a_share_of_processor_time_sets_the_workers() {
+        let mut files = large_system(2, 96, 8);
+        files.insert("proc/self/cgroup".into(), "0::/pods/pod_3/main\n".into());
+        files.insert("sys/fs/cgroup/pods/pod_3/main/cpu.max".into(), "1600000 100000\n".into());
+        files.insert("sys/fs/cgroup/pods/cpu.max".into(), "max 100000\n".into());
+        let p = profile_of(&files).expect("profile");
+        assert_eq!((p.cores, p.threads), (16, 16));
+        assert!(p.os_places_threads);
+        assert!(p.core_map.iter().all(|c| c.threads.len() == 1));
+        assert_eq!(p.core_map[15].threads, vec![15]);
+        assert_eq!((p.l1.len(), p.l2.len(), p.l3.len()), (16, 16, 2));
+        assert!(p.l3.iter().all(|c| c.threads.len() == 8));
+        let shares = engine::tier::Shares::from_profile(&p);
+        assert_eq!(shares.active_workers, 16);
+        // a part of a processor counts as a whole one, and the least share on the way up decides
+        files.insert("sys/fs/cgroup/pods/pod_3/cpu.max".into(), "250000 100000\n".into());
+        let p = profile_of(&files).expect("profile");
+        assert_eq!((p.cores, p.threads), (3, 3));
+        // more than every core has a first thread for: second threads follow
+        files.insert("sys/fs/cgroup/pods/pod_3/cpu.max".into(), "max 100000\n".into());
+        files.insert("sys/fs/cgroup/pods/pod_3/main/cpu.max".into(), "20000000 100000\n".into());
+        let p = profile_of(&files).expect("profile");
+        assert_eq!((p.cores, p.threads), (192, 200));
+        assert_eq!(p.core_map.iter().filter(|c| c.threads.len() == 2).count(), 8);
+        // no share set, or one larger than the machine: every thread, placed by the program
+        files.insert("sys/fs/cgroup/pods/pod_3/main/cpu.max".into(), "max 100000\n".into());
+        let p = profile_of(&files).expect("profile");
+        assert_eq!((p.cores, p.threads), (192, 384));
+        assert!(!p.os_places_threads);
+        files.insert("sys/fs/cgroup/pods/pod_3/main/cpu.max".into(), "99900000 100000\n".into());
+        let p = profile_of(&files).expect("profile");
+        assert_eq!((p.cores, p.threads), (192, 384));
+        assert!(!p.os_places_threads);
     }
 
     /// A job confined by its batch system: the threads of one package, that package's memory
