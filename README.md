@@ -8,6 +8,8 @@ The Chudnovsky series is summed by binary splitting, numbers are multiplied by a
 
 [DESIGN.md](DESIGN.md) is the design the code follows. Its status line predates the code.
 
+**Status.** This is the source as it stands on 2026-11-25, published at its author's word. It is not a release as section 15 of the design defines one: that takes at least 1.3 times y-cruncher's speed in memory at 10¹⁰ to 10¹¹ digits and 1.5 times out of core, on one machine. Neither has been measured. The machine under [Results](#results) holds 5 × 10⁹ digits at most, where the program runs at 1.2 to 1.3 times y-cruncher's speed, and the out-of-core path is not finished (see [Limits](#limits)).
+
 ## Requirements
 
 - A CPU at x86-64-v4 (AVX-512 F, CD, BW, DQ and VL) with ADX. On any other x86-64 chip the program still runs, on portable reference kernels that are far slower.
@@ -42,6 +44,8 @@ cargo test --release
 ```
 
 runs four gates: kernels against their reference bit for bit and whole runs against known digits (gate 1), plans for machines from one core to the largest a profile can describe, whole runs planned for described machines of 256 to 1,024 workers under 4 to 64 last-level caches, and the ladder of responses to a failed check (gate 2), stop and resume at every stage (gate 3), and the planner's determinism (gate 4). Every product is checked while it is made by a check word modulo 2⁶¹ − 1.
+
+Two tests of gate 1 compare the digits with y-cruncher itself. They need its Windows package unpacked as `y-cruncher v0.8.7.9547b/` beside the sources; it is not part of this repository. Where it is missing they say that the comparison was not made, and pass.
 
 A check word proves a product, not that the right numbers were multiplied. The one silent fault found so far was of that kind: on a described machine of 256 cores under four caches, one merge of a 10⁸-digit run multiplied by an operand it had lent to another worker, and the digits were wrong from the 90,965,871st on with every check in order. It is fixed, and that run is now a test.
 
