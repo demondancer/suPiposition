@@ -496,6 +496,7 @@ impl RegionMapper for WinRegionMapper {
                         state = 1;
                         if bytes <= lp_min {
                             rep.huge_pages_used = true;
+                            rep.backing_fixed = true;
                             rep.pinned_used = true;
                             return Some((probe, lp_min, rep));
                         }
@@ -522,6 +523,7 @@ impl RegionMapper for WinRegionMapper {
                 );
                 if !p.is_null() {
                     rep.huge_pages_used = true;
+                    rep.backing_fixed = true;
                     rep.pinned_used = true;
                     return Some((p, huge_len, rep));
                 }
@@ -578,6 +580,7 @@ impl RegionMapper for WinRegionMapper {
             }
             // Check if `ptr` was already committed via `MEM_LARGE_PAGES`:
             rep.huge_pages_used = true;
+            rep.backing_fixed = true;
             rep.pinned_used = true;
             Ok(rep)
         }

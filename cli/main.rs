@@ -16,7 +16,9 @@ use std::process::ExitCode;
 use engine::plan::{Calibration, DeviceCalibration, OutputFormat, PlanOverrides};
 use engine::refk::Kernels;
 use engine::tier::Profile;
-use engine::{CheckpointStageKind, EngineConfig, StopCondition, plan_only, run};
+use engine::{
+    CheckpointStageKind, EngineConfig, StopCondition, least_memory_for_run, plan_only, run,
+};
 
 fn parse_byte_count(s: &str) -> Result<u64, String> {
     let clean = s.trim().replace('_', "");
@@ -470,7 +472,11 @@ fn main() -> ExitCode {
     cfg.overrides = overrides;
     cfg.members = penv.members;
     cfg.region_mapper = Some(penv.region_mapper);
-    cfg.thread_placer = Some(penv.thread_placer);
+    // The workers of a described machine are numbered by that machine's threads, which this one
+    // does not have: tying the few whose numbers exist here to those threads, and leaving the
+    // rest to roam over them, only makes the tied ones wait. Such a run leaves all placing to
+    // the system; its plan is the described machine's all the same.
+    cfg.thread_placer = is_host_profile.then_some(penv.thread_placer);
     cfg.stop_condition = stop_condition;
     cfg.progress_reporter = Some(&live_reporter);
 
@@ -499,10 +505,24 @@ fn main() -> ExitCode {
                     plan.pace_bound,
                     plan.planned_total_sec,
                 );
+                // What a job has to ask its batch system for.
+                if let Some(least) = least_memory_for_run(&cfg) {
+                    println!(
+                        "Memory: at least {:.2} GiB for this run in memory; the profile has {:.2} GiB",
+                        (least as f64) / (1024.0 * 1024.0 * 1024.0),
+                        (shares.total_ram as f64) / (1024.0 * 1024.0 * 1024.0),
+                    );
+                }
                 return ExitCode::SUCCESS;
             }
             Err(e) => {
                 eprintln!("Plan error: {e}");
+                if let Some(least) = least_memory_for_run(&cfg) {
+                    eprintln!(
+                        "Memory: at least {:.2} GiB for this run in memory",
+                        (least as f64) / (1024.0 * 1024.0 * 1024.0),
+                    );
+                }
                 return ExitCode::from(1);
             }
         }

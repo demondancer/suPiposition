@@ -194,6 +194,9 @@ impl RegionMapper for LinuxRegionMapper {
             );
             if (p_huge as isize) != -1 && !p_huge.is_null() {
                 rep.huge_pages_used = true;
+                // Pages of the reserved pool come and go two megabytes at a time, and the
+                // arenas give back in pages of four kilobytes: this backing stays.
+                rep.backing_fixed = true;
                 prefer_node(p_huge, len, numa_node);
                 return Some((p_huge, len, rep));
             }
@@ -210,6 +213,8 @@ impl RegionMapper for LinuxRegionMapper {
             }
             prefer_node(p, len, numa_node);
             if madvise(p, len, MADV_HUGEPAGE) == 0 {
+                // (huge pages on request: the system takes them back like any others, so the
+                // backing is not fixed and `decommit_range` returns it)
                 rep.huge_pages_used = true;
             } else {
                 rep.huge_pages_refused = true;

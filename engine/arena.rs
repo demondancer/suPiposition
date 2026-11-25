@@ -24,6 +24,10 @@ pub struct MappingReport {
     pub huge_pages_refused: bool,
     pub pinned_used: bool,
     pub pin_refused: bool,
+    /// The region's backing cannot be given back a part at a time: large pages that the system
+    /// keeps whole and locked. Huge pages that the system hands out on request and takes back
+    /// like any others leave this unset, and the arenas return what they free.
+    pub backing_fixed: bool,
 }
 
 impl MappingReport {
@@ -33,6 +37,7 @@ impl MappingReport {
         self.huge_pages_refused |= other.huge_pages_refused;
         self.pinned_used |= other.pinned_used;
         self.pin_refused |= other.pin_refused;
+        self.backing_fixed |= other.backing_fixed;
     }
 }
 
@@ -115,6 +120,26 @@ static SYSTEM_REGION_MAPPER: SystemRegionMapper = SystemRegionMapper;
 /// Blocks of at least this many bytes in `Numbers` (above subtree depth) and `Transforms` come
 /// from whole-page `Region`s; smaller blocks come from per-worker 64-byte LIFO/coalescing slabs.
 pub const REGION_MIN_BLOCK: usize = 64 * 1024;
+
+/// What a worker's scratch may ask for: eight times its cache share, for the tiles and rows
+/// that a product's sweeps hold at once. The planner sets this much aside when it commits
+/// memory, and the scratch slabs are given room for it (`scratch_reserve_bytes`), so what the
+/// arenas may take and what the plan counts cannot drift apart.
+pub fn scratch_demand_bytes(cache_share_bytes: u64) -> u64 {
+    cache_share_bytes
+        .max(REGION_MIN_BLOCK as u64)
+        .saturating_mul(8)
+}
+
+/// The room a worker's scratch slab is given: what its scratch may ask for, within a quarter of
+/// the memory shared out among the workers. Scratch beyond a slab's room comes from the system.
+pub fn scratch_reserve_bytes(cache_share_bytes: u64, usable_ram_cap: u64, workers: usize) -> usize {
+    let nw = workers.max(1);
+    let max_virt_pw = ((usable_ram_cap / 4) / (nw as u64)).max(REGION_MIN_BLOCK as u64) as usize;
+    let cache_b = (cache_share_bytes as usize).clamp(REGION_MIN_BLOCK, max_virt_pw);
+    (scratch_demand_bytes(cache_b as u64).min(usize::MAX as u64) as usize)
+        .min(max_virt_pw.max(cache_b))
+}
 /// Blocks of at least this many bytes in a `Region` are cut from the high end downward, smaller
 /// ones from its start upward so transient multi-megabyte workspaces never split smaller blocks.
 pub const REGION_LARGE_BLOCK: usize = 8 * 1024 * 1024;
@@ -657,7 +682,7 @@ impl Region {
     }
 
     fn decommit_span(&self, s: &mut RegionState, from: u64, to: u64) {
-        if from >= to || s.report.huge_pages_used {
+        if from >= to || s.report.backing_fixed {
             return;
         }
         let mut overlaps: Vec<(u64, u64)> = Vec::new();
@@ -721,7 +746,7 @@ impl Region {
         prot_from: u64,
         prot_to: u64,
     ) {
-        if s.backed_pages <= target_cap || s.report.huge_pages_used {
+        if s.backed_pages <= target_cap || s.report.backing_fixed {
             return;
         }
         let decommit_avoiding_prot = |s: &mut RegionState, a: u64, b: u64| {
@@ -1822,7 +1847,7 @@ impl ArenaSet {
             let reserve_b = if is_sys_fallback {
                 cache_b.min(max_virt_pw)
             } else {
-                cache_b.saturating_mul(8).min(max_virt_pw.max(cache_b))
+                scratch_reserve_bytes(w.cache_share_bytes, usable_ram_cap, nw)
             };
             let slab = LifoSlab::new(m, reserve_b, w.numa_node);
             scratch.push(Arena {

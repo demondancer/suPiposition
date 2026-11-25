@@ -2126,3 +2126,108 @@ fn gate2_a_merge_with_its_p_lent_out_keeps_its_form() {
         "the first hundred million digits under the described machine: {text}"
     );
 }
+
+/// What a plan commits of the memory never adds up to more than the profile has (sections 6 and
+/// 10): the numbers at their most, what the workers' scratch may ask for, and the room of the
+/// transforms together keep within the usable memory, and a run that cannot be planned so, on a
+/// system without a store, is refused at the start. A billion digits on sixteen workers were once
+/// planned into four gigabytes, five eighths of them for transforms beside numbers that took
+/// nearly all of it; such a run started, passed its memory, and under a limit was killed.
+#[test]
+fn gate2_a_plan_commits_no_more_memory_than_the_profile_has() {
+    let cal = Calibration::synthetic(2.0e9, 60.0e9, true, Vec::new());
+    let mib = 1024u64 * 1024;
+    // (cores, threads, L1 and L2 a core, last-level caches, the size of each)
+    let machines: [(u64, u64, u64, u64, u64, u64); 3] = [
+        (8, 16, 48 * 1024, mib, 1, 96 * mib),
+        (256, 256, 48 * 1024, 2 * mib, 4, 320 * mib),
+        (2, 2, 16 * 1024, 64 * 1024, 1, 512 * 1024),
+    ];
+    for (cores, threads, l1, l2, caches, l3) in machines {
+        for digits in [1_000_000u64, 100_000_000, 1_000_000_000, 10_000_000_000, 100_000_000_000] {
+            let mut ram = 8 * mib;
+            let mut accepted_at: Option<u64> = None;
+            let mut refused = 0u32;
+            while ram <= (1u64 << 42) {
+                let profile = if caches > 1 {
+                    Profile::synthetic_multi_domain(cores, threads, caches, l1, l2, l3, ram, &[], &[])
+                } else {
+                    Profile::synthetic(cores, threads, l1, l2, l3, ram, &[], &[])
+                };
+                let shares = Shares::from_profile(&profile);
+                let usable = shares.total_ram - shares.total_ram / 16;
+                match Plan::build(digits, OutputFormat::Text, &shares, &cal, PlanOverrides::default()) {
+                    Ok(plan) => {
+                        assert!(
+                            !plan.out_of_core,
+                            "{digits} digits, {cores} cores, {ram} bytes: a run that needs a store was planned without one"
+                        );
+                        let scratch = plan
+                            .ram_scratch_per_worker
+                            .saturating_mul(shares.worker_count)
+                            .saturating_add(plan.scratch_beyond_plan_bytes);
+                        let committed = plan
+                            .numbers_peak_bytes
+                            .saturating_add(scratch)
+                            .saturating_add(plan.ram_transform_budget);
+                        assert!(
+                            committed <= usable,
+                            "{digits} digits, {cores} cores, {ram} bytes of memory: the plan commits {committed} of {usable} usable bytes (numbers {}, scratch {scratch}, transforms {})",
+                            plan.numbers_peak_bytes,
+                            plan.ram_transform_budget
+                        );
+                        accepted_at.get_or_insert(ram);
+                    }
+                    Err(PlanError::InsufficientCapacity { .. }) => {
+                        assert!(
+                            accepted_at.is_none(),
+                            "{digits} digits, {cores} cores: refused with {ram} bytes after being planned with {} bytes",
+                            accepted_at.unwrap_or(0)
+                        );
+                        refused += 1;
+                    }
+                    Err(e) => panic!("{digits} digits, {cores} cores, {ram} bytes: {e:?}"),
+                }
+                ram += ram / 4;
+            }
+            assert!(
+                accepted_at.is_some(),
+                "{digits} digits on {cores} cores are planned with four tebibytes of memory"
+            );
+            if digits >= 100_000_000 {
+                assert!(
+                    refused > 0,
+                    "{digits} digits on {cores} cores are refused with eight mebibytes of memory"
+                );
+            }
+            // The least memory the planner names is the least: the run is planned with it and
+            // refused with a twentieth less.
+            let profile = if caches > 1 {
+                Profile::synthetic_multi_domain(cores, threads, caches, l1, l2, l3, 1u64 << 30, &[], &[])
+            } else {
+                Profile::synthetic(cores, threads, l1, l2, l3, 1u64 << 30, &[], &[])
+            };
+            let mut shares = Shares::from_profile(&profile);
+            let least = Plan::least_memory_admitted(
+                digits,
+                OutputFormat::Text,
+                &shares,
+                &cal,
+                &PlanOverrides::default(),
+            )
+            .expect("some amount of memory admits the run");
+            shares.total_ram = least;
+            assert!(
+                Plan::build(digits, OutputFormat::Text, &shares, &cal, PlanOverrides::default()).is_ok(),
+                "{digits} digits on {cores} cores with the least memory named, {least} bytes"
+            );
+            if digits >= 100_000_000 {
+                shares.total_ram = least - least / 20;
+                assert!(
+                    Plan::build(digits, OutputFormat::Text, &shares, &cal, PlanOverrides::default()).is_err(),
+                    "{digits} digits on {cores} cores with a twentieth less than the least memory named"
+                );
+            }
+        }
+    }
+}

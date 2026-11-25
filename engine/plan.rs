@@ -1824,6 +1824,12 @@ pub struct Plan {
     pub ram_transform_budget: u64,
     pub ram_numbers_budget: u64,
     pub ram_scratch_per_worker: u64,
+    /// The most the run's numbers take at once, by the planner's own sizes: the five inputs and
+    /// the three products of the root merge, or the numbers of the finish where those are more.
+    pub numbers_peak_bytes: u64,
+    /// What the workers' scratch may ask for beyond `ram_scratch_per_worker` a worker
+    /// (`arena::scratch_demand_bytes`).
+    pub scratch_beyond_plan_bytes: u64,
     pub checkpoint_enabled: bool,
     pub checkpoint_mult: f64,
     pub est_checkpoint_write_sec: f64,
@@ -1837,12 +1843,88 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The plan of a run. What a plan commits of the memory never adds up to more than the
+    /// profile has: the numbers get three eighths of it and the transforms the rest, and where a
+    /// first plan finds that the numbers at their most (with the room of the workers' scratch)
+    /// need more than their share, the run is planned again with that much set aside for them,
+    /// so the transforms get what is left. A run that goes to the store keeps the shares.
     pub fn build(
         digits: u64,
         format: OutputFormat,
         shares: &Shares,
         cal: &Calibration,
         overrides: PlanOverrides,
+    ) -> Result<Self, PlanError> {
+        let mut plan =
+            Self::build_with_numbers_floor(digits, format, shares, cal, overrides.clone(), 0)?;
+        // (planned again, a run may divide at other levels and so hold other numbers: a few
+        // rounds settle it)
+        for _ in 0..3 {
+            let need = plan
+                .numbers_peak_bytes
+                .saturating_add(plan.scratch_beyond_plan_bytes);
+            if plan.out_of_core || need <= plan.ram_numbers_budget {
+                break;
+            }
+            plan = Self::build_with_numbers_floor(
+                digits,
+                format,
+                shares,
+                cal,
+                overrides.clone(),
+                need,
+            )?;
+        }
+        Ok(plan)
+    }
+
+    /// The least memory, to within a hundredth, with which this run is planned in memory on
+    /// the other resources of `shares`: what a job has to be given. `None` where no amount of
+    /// memory admits it. The planner admits a run with more memory wherever it admits it with
+    /// less, so the least is found by halving.
+    pub fn least_memory_admitted(
+        digits: u64,
+        format: OutputFormat,
+        shares: &Shares,
+        cal: &Calibration,
+        overrides: &PlanOverrides,
+    ) -> Option<u64> {
+        let admits = |ram: u64| -> bool {
+            let mut s = shares.clone();
+            s.total_ram = ram;
+            matches!(
+                Self::build(digits, format, &s, cal, overrides.clone()),
+                Ok(p) if !p.out_of_core
+            )
+        };
+        let mut hi = shares.total_ram.max(1 << 20);
+        let mut doublings = 0u32;
+        while !admits(hi) {
+            if hi >= (1u64 << 62) || doublings >= 48 {
+                return None;
+            }
+            hi = hi.saturating_mul(2);
+            doublings += 1;
+        }
+        let mut lo = 0u64;
+        while hi - lo > hi / 128 {
+            let mid = lo + (hi - lo) / 2;
+            if admits(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Some(hi)
+    }
+
+    fn build_with_numbers_floor(
+        digits: u64,
+        format: OutputFormat,
+        shares: &Shares,
+        cal: &Calibration,
+        overrides: PlanOverrides,
+        numbers_floor: u64,
     ) -> Result<Self, PlanError> {
         let output_file_bytes = format.file_bytes(digits).ok_or_else(|| {
             PlanError::InsufficientCapacity {
@@ -1903,7 +1985,10 @@ impl Plan {
             .min(max_scratch_pw);
         let total_scratch = scratch_per_worker.saturating_mul(nw_u64);
         let rem_ram = usable_ram.saturating_sub(total_scratch);
-        let ram_numbers_budget = (rem_ram / 8) * 3 + ((rem_ram % 8) * 3) / 8;
+        // The numbers get three eighths of what is left, or what a first plan found them to need
+        // at their most where that is more (`numbers_floor`); the transforms get the rest.
+        let ram_numbers_share = (rem_ram / 8) * 3 + ((rem_ram % 8) * 3) / 8;
+        let ram_numbers_budget = ram_numbers_share.max(numbers_floor).min(rem_ram);
         let ram_transform_budget = rem_ram.saturating_sub(ram_numbers_budget);
 
         // Shortest-path DP over levels `0..=tree_height` to choose dividing levels (Section 4 & 10).
@@ -1969,6 +2054,10 @@ impl Plan {
         let plain_bpt =
             53.28102 + 3.0 * ((term_count as f64) / std::f64::consts::E).max(1.0).log2();
         let shed_bpt_tbl = compute_level_shed_bpt(tree_height, leaf_len);
+        // (the sizes of the root merge's inputs, for the count of what the numbers take)
+        let mut top_qt_bits = 0u64;
+        let mut top_p_bits = 0u64;
+        let mut top_qt_moved = 0u64;
         for lv in 1..=tree_height {
             let nodes = 1u64 << (tree_height - lv);
             let child_terms = leaf_len.saturating_mul(1u64 << (lv - 1));
@@ -1980,12 +2069,16 @@ impl Plan {
             };
             let qt_bits = ((child_terms as f64) * reduced_bpt).ceil() as u64 + 64;
             let p_bits = qt_bits.saturating_sub(child_terms * 14).max(64);
+            if lv == tree_height {
+                top_qt_bits = qt_bits;
+                top_p_bits = p_bits;
+            }
             let par_w = if nodes < nw_u64 {
                 ((nw_u64 / nodes.max(1)).max(1)).min(usize::MAX as u64) as usize
             } else {
                 1
             };
-            let (_, mp_qt) = choose_product_method_and_price(
+            let (m_qt, mp_qt) = choose_product_method_and_price(
                 qt_bits,
                 qt_bits,
                 true,
@@ -2007,8 +2100,13 @@ impl Plan {
                 ram_transform_budget,
                 &overrides,
             );
-            if matches!(m_check, MulMethod::Ntt(s) if s.out_of_core) {
+            if matches!(m_check, MulMethod::Ntt(s) if s.out_of_core)
+                || matches!(m_qt, MulMethod::Ntt(s) if s.out_of_core)
+            {
                 uses_store = true;
+            }
+            if lv == tree_height {
+                top_qt_moved = mp_qt.bytes_moved;
             }
             // Fused merge ~ 7/3 of a single product + 1 P-product (skipping P on rightmost node).
             let conc_nodes = if nodes >= nw_u64 {
@@ -2040,9 +2138,13 @@ impl Plan {
         let min_hold_bytes = root_num_bytes
             .saturating_mul(3)
             .saturating_add(finish_bytes.saturating_mul(3));
-        if min_hold_bytes > usable_ram {
-            uses_store = true;
-        }
+        // What the numbers take at once at their most: at the root merge its five inputs and its
+        // three products (`Q1 Q2`, `Q2 T1`, `P1 T2`), in the finish `min_hold_bytes`.
+        let root_merge_bytes = top_p_bits
+            .saturating_mul(2)
+            .saturating_add(top_qt_bits.saturating_mul(9))
+            / 8;
+        let numbers_peak_bytes = root_merge_bytes.max(min_hold_bytes);
         let total_mem_and_store = usable_ram
             .saturating_add(shares.total_vram)
             .saturating_add(shares.total_ssd.saturating_sub(output_file_bytes.min(shares.total_ssd)));
@@ -2058,7 +2160,7 @@ impl Plan {
 
         // Price finish (~7% of series) and conversion (~8% of series) from actual target_frac_bits.
         let fin_par_w = nw_u64.min(usize::MAX as u64) as usize;
-        let (_, fin_p) = choose_product_method_and_price(
+        let (m_fin, fin_p) = choose_product_method_and_price(
             target_frac_bits,
             target_frac_bits,
             false,
@@ -2081,6 +2183,54 @@ impl Plan {
         total_bytes = total_bytes
             .saturating_add(((fin_p.bytes_moved as f64) * finish_plus_conv_mult) as u64);
         total_bf += fin_p.butterflies_equiv * finish_plus_conv_mult;
+        if matches!(m_fin, MulMethod::Ntt(s) if s.out_of_core) {
+            uses_store = true;
+        }
+
+        // What the workers' scratch may ask for, of which `total_scratch` is counted above: eight
+        // cache shares a worker (`arena::scratch_demand_bytes`), and never more than the run's
+        // largest product moves through memory, since scratch holds pieces of the product being
+        // made. A small run on a machine of large caches asks for little.
+        let largest_operand_bytes = top_qt_bits.max(target_frac_bits) / 8;
+        let product_moves = top_qt_moved
+            .max(fin_p.bytes_moved)
+            .max(largest_operand_bytes.saturating_mul(8));
+        let scratch_reserve_total: u64 = if shares.workers.is_empty() {
+            crate::arena::scratch_demand_bytes(shares.min_l2_share.max(scratch_per_worker))
+                .min(product_moves)
+                .saturating_mul(nw_u64)
+        } else {
+            shares
+                .workers
+                .iter()
+                .map(|w| {
+                    crate::arena::scratch_demand_bytes(w.l2_share.max(scratch_per_worker))
+                        .min(product_moves)
+                })
+                .fold(0u64, u64::saturating_add)
+        };
+        let scratch_beyond_plan_bytes = scratch_reserve_total.saturating_sub(total_scratch);
+        // With that scratch, the numbers at their most are what has to be in memory beside the
+        // transforms.
+        let beside_transforms = numbers_peak_bytes.saturating_add(scratch_reserve_total);
+        if beside_transforms > usable_ram {
+            uses_store = true;
+        }
+
+        // Without a store, a run has to fit in memory (section 6): its numbers at their most, the
+        // workers' scratch, and the transforms of its products. Where they do not, it does not
+        // start (section 10), instead of starting and then passing the memory it was given.
+        let store_bytes = total_mem_and_store.saturating_sub(usable_ram);
+        if uses_store && store_bytes == 0 {
+            let left = usable_ram.saturating_sub(beside_transforms);
+            return Err(PlanError::InsufficientCapacity {
+                needed_bytes: beside_transforms.max(usable_ram.saturating_add(1)),
+                available_bytes: usable_ram,
+                detail: format!(
+                    "Run for {digits} digits does not fit in memory, and there is no store: its numbers take {numbers_peak_bytes} bytes at their most and the workers' scratch {scratch_reserve_total}, which leaves {left} of the {usable_ram} usable bytes for the transforms of its products"
+                ),
+            });
+        }
 
         let checkpoint_enabled = shares.total_ssd > 0;
         let ssd_rate = if shares.total_vram > 0 && cal.devices.len() >= 2 {
@@ -2124,6 +2274,8 @@ impl Plan {
             ram_transform_budget,
             ram_numbers_budget,
             ram_scratch_per_worker: scratch_per_worker,
+            numbers_peak_bytes,
+            scratch_beyond_plan_bytes,
             checkpoint_enabled,
             checkpoint_mult: overrides.checkpoint_mult,
             est_checkpoint_write_sec,

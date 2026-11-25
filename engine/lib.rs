@@ -310,6 +310,15 @@ fn rerank_shares(shares: &mut Shares, core_ntt: &[(u64, f64)]) -> bool {
 
 /// Deterministic `--plan-only` entry point.
 pub fn plan_only(cfg: &EngineConfig<'_>) -> Result<(Shares, Calibration, Plan), EngineError> {
+    let (shares, cal) = shares_and_calibration(cfg);
+    let plan = Plan::build(cfg.digits, cfg.format, &shares, &cal, cfg.overrides.clone())
+        .map_err(EngineError::Plan)?;
+    Ok((shares, cal, plan))
+}
+
+/// The shares of the configuration's profile and its calibration figures, supplied or measured,
+/// with the kernels set up for them: what a plan is made from.
+fn shares_and_calibration(cfg: &EngineConfig<'_>) -> (Shares, Calibration) {
     let mut shares = Shares::from_profile(&cfg.profile);
     let cal = if let Some(c) = &cfg.supplied_calibration {
         rerank_shares(&mut shares, &c.core_ntt_bf_per_sec);
@@ -335,9 +344,14 @@ pub fn plan_only(cfg: &EngineConfig<'_>) -> Result<(Shares, Calibration, Plan), 
     cfg.kernels
         .sqr_base_rows_max
         .store(cal.sqr_base_rows_max, std::sync::atomic::Ordering::Relaxed);
-    let plan = Plan::build(cfg.digits, cfg.format, &shares, &cal, cfg.overrides.clone())
-        .map_err(EngineError::Plan)?;
-    Ok((shares, cal, plan))
+    (shares, cal)
+}
+
+/// The least memory with which the configuration's run is planned in memory on the profile's
+/// other resources (`Plan::least_memory_admitted`): the figure a job asks its batch system for.
+pub fn least_memory_for_run(cfg: &EngineConfig<'_>) -> Option<u64> {
+    let (shares, cal) = shares_and_calibration(cfg);
+    Plan::least_memory_admitted(cfg.digits, cfg.format, &shares, &cal, &cfg.overrides)
 }
 
 #[derive(Clone, Debug)]
@@ -2441,7 +2455,9 @@ pub fn run(cfg: &EngineConfig<'_>) -> Result<RunReport, EngineError> {
         ));
         crate::arena::register_arena_set(&arenas);
         if !plan.out_of_core && !plan.roomy_run() {
-            let soft_cap = ((shares.total_ram / 32).saturating_mul(31)) as usize;
+            // The arenas keep within what the plan commits: the memory less the sixteenth the
+            // planner leaves the system, the program's stacks and its tables.
+            let soft_cap = (shares.total_ram.saturating_sub(shares.total_ram / 16)) as usize;
             arenas.set_soft_cap(soft_cap.max(64 * 1024 * 1024));
         }
 
