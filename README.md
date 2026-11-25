@@ -1,12 +1,12 @@
 # suPiposition
 
-**An autotuned, multithreaded program for computing π to billions of decimal digits on shared-memory systems.**
+**A multithreaded program for computing π to billions of decimal digits on shared-memory systems.**
 
 ## Abstract
 
 suPiposition computes π with the Chudnovsky series [1], evaluated by binary splitting [2, 3]. Large products are computed with a floating-point fast Fourier transform (FFT) or with a multi-prime number-theoretic transform (NTT) [4, 5], organized as a cache-blocked, three-pass (column, row, column) transform related to Bailey's four-step method [6]. The final division and square root are obtained from a single Newton–Raphson iteration for the reciprocal square root, and radix conversion uses a divide-and-conquer algorithm [13]. All inner loops are confined to 24 hand-written assembly kernels that are bound at startup and validated against portable reference implementations.
 
-No block size, crossover point, or thread count is fixed in the source. Every such parameter is derived at startup from the discovered hardware topology (cores, hardware threads, each cache and the threads that share it, NUMA nodes, and available memory) and from a short calibration run, in the tradition of autotuned numerical software [7, 8]. Every product is verified by a residue checksum, a form of algorithm-based fault tolerance [9].
+No block size, crossover point, or thread count is fixed in the source. Every such parameter is derived at startup from the discovered hardware topology (cores, hardware threads, each cache and the threads that share it, NUMA nodes, and available memory) and from a short calibration run, in the tradition of self-adapting numerical software [7, 8]. Every product is verified by a residue checksum, a form of algorithm-based fault tolerance [9].
 
 On the system evaluated in Section 5, suPiposition computes 10⁹ to 5 × 10⁹ digits 1.2 to 1.3 times faster than y-cruncher v0.8.7 [10], and its output agrees with that program's to the last digit.
 
@@ -52,7 +52,7 @@ The computation has three stages.
 
 **Multiplication.** Products are computed by the schoolbook method, by Karatsuba's method, by a complex floating-point FFT whose rounding error is checked against a bound on every product, or by an NTT over 3 to 18 primes below 2⁵⁰, with residues held as integer-valued doubles and modular reduction performed by fused multiply-add. The crossover points are measured at startup.
 
-**Autotuning.** At startup the program reads the hardware topology from the operating system and measures a small set of calibration figures: kernel throughput, memory bandwidth, and the crossover points. A planner then selects, for every product, the method, the number of primes, the coefficient length, and the transform's block decomposition so that each working set fits the worker's share of the corresponding cache level. The plan classifies each phase as compute-bound or memory-bandwidth-bound, the two regimes of the Roofline model [11], and trades arithmetic for memory traffic accordingly.
+**Calibration and planning.** At startup the program reads the hardware topology from the operating system and measures a small set of calibration figures: kernel throughput, memory bandwidth, and the crossover points. A planner then selects, for every product, the method, the number of primes, the coefficient length, and the transform's block decomposition so that each working set fits the worker's share of the corresponding cache level. The plan classifies each phase as compute-bound or memory-bandwidth-bound, the two regimes of the Roofline model [11], and trades arithmetic for memory traffic accordingly.
 
 **Parallelism.** A fork-join scheduler with work stealing [12] runs one worker thread per hardware thread. At the lower levels of the splitting tree, each subtree is evaluated by a single worker; at the upper levels, each product is itself parallelized across primes and transform blocks.
 
